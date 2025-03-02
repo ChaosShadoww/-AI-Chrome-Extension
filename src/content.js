@@ -1,164 +1,180 @@
-import * as InboxSDK from "@inboxsdk/core";
-
-
-InboxSDK.load(2, "sdk_OpenAI_a19ee5a9fd").then((sdk) => {
-  sdk.Compose.registerComposeViewHandler((composeView) => {
-    composeView.addButton({
-      title: "Write this better",
-      iconUrl: "https://image.ibb.co/mXS2ZU/images.png",
-      iconClass: "cursor-pointer",
-      onClick: function (event) {
-        createModal(composeView, sdk.Widgets);
-      },
-    });
-  });
-});
-
-
-const disabledBtn = (disabled = true) => {
-  try {
-    document
-      .querySelector(".inboxsdk__modal_buttons")
-      .childNodes.forEach((input) => {
-        input.disabled = disabled;
-      });
-  } catch (e) {}
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => func(...args), wait);
+  };
 };
 
-
-const generateText = async (inputText) => {
-  try {
-    const {
-      data: { choices },
-    } = await executeOpenAi({
-      model: "text-davinci-003",
-      prompt:
-        "Regenerate this email in a better way:" +
-        inputText.replaceAll("<br>", "\n"),
-      temperature: 0,
-      max_tokens: 500,
-      top_p: 1.0,
-      frequency_penalty: 0.0,
-      presence_penalty: 0.0,
-    });
-
-
-    if (choices && choices.length) {
-      return choices[0].text || "No suggestions";
-    }
-
-
-    return inputText.replaceAll("\n", "<br>");
-  } catch (e) {
-    console.log(e);
-    return inputText;
-  }
-};
-
-
-const executeOpenAi = (body) => {
-  return new Promise(function (resolve, reject) {
-    const requestOptions = {
+const getGeminiCompletion = async message => {
+  const response = await fetch("http://localhost:3000/api/gemini", { // Change to production URL when deploying
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Bearer " +
-          String("<Your_token>"),
+          "Content-Type": "application/json"
       },
-      body: JSON.stringify(body),
-    };
-    fetch("https://api.openai.com/v1/completions", requestOptions)
-      .then((response) => response.json())
-      .then((data) => {
-        resolve({
-          data,
-        });
-      })
-      .catch((err) => {
-        reject(err);
-      });
+      body: JSON.stringify({ message }),
   });
+
+  if (!response.ok) {
+      throw new Error("Failed to get completion");
+  }
+
+  const data = await response.json();
+  try {
+      return typeof data.response === "string" ? JSON.parse(data.response) : data.response;
+  } catch (e) {
+      return data.response;
+  }
 };
 
-
-const createModal = (composeView, Widgets) => {
-  if (!composeView.getHTMLContent().length) {
-    return;
+class SuggestionOverlay {
+  constructor() {
+      this.overlay = document.createElement("div");
+      this.overlay.className = "ai-suggestion-overlay";
+      this.overlay.style.cssText = `
+          position: absolute;
+          pointer-events: none;
+          color: #9CA3AF;
+          font-family: monospace;
+          white-space: pre;
+          z-index: 10000;
+          background: transparent;   
+      `;
+      document.body.appendChild(this.overlay);
   }
 
+  show(element, suggestion, cursorPosition) {
+      const rect = element.getBoundingClientRect();
+      const computedStyle = window.getComputedStyle(element);
 
-  const parser = new DOMParser();
-  const htmlDoc = parser.parseFromString(
-    composeView.getHTMLContent(),
-    "text/html"
-  );
+      const measureSpan = document.createElement("span");
+      measureSpan.style.cssText = `
+          position: absolute;
+          visibility: hidden;
+          font-family: ${computedStyle.fontFamily};
+          font-size: ${computedStyle.fontSize};
+          letter-spacing: ${computedStyle.letterSpacing};
+          white-space: pre;
+      `;
+      measureSpan.textContent = element.value.substring(0, cursorPosition);
+      document.body.appendChild(measureSpan);
 
+      const textWidth = measureSpan.getBoundingClientRect().width;
+      document.body.removeChild(measureSpan);
 
-  const gmailQoute = htmlDoc.querySelector(".gmail_quote");
-  if (gmailQoute) {
-    gmailQoute.remove();
+      this.overlay.style.top = `${rect.top + window.scrollY}px`;
+      this.overlay.style.left = `${rect.left + window.scrollX + textWidth}px`; 
+      this.overlay.style.height = computedStyle.lineHeight;
+      this.overlay.style.padding = computedStyle.padding;
+      this.overlay.style.fontSize = computedStyle.fontSize;
+      this.overlay.style.fontFamily = computedStyle.fontFamily;
+      this.overlay.style.letterSpacing = computedStyle.letterSpacing;
+      this.overlay.lineHeight = computedStyle.lineHeight;
+
+      this.overlay.textContent = suggestion;
+      this.overlay.style.display = "block";
   }
 
+  hide() {
+      this.overlay.style.display = "none";
+  }
+}
 
-  const newContent = htmlDoc.querySelector("body").innerHTML;
+class AICompletion {
+  constructor() {
+      this.currentElement = null;
+      this.suggestion = "";
+      this.overlay = new SuggestionOverlay();
+      this.cursorPosition = 0;
 
+      this.debounceGetSuggestion = debounce(
+          this.getSuggestion.bind(this), 
+          500
+      );
 
-  const el = document.createElement("div");
-  el.innerHTML = `<div id="open-ai-div">
-    <div id="open-ai-text">Loading...</div>
-  </div>`;
+      this.setupEventListeners();
+  }
 
+  async getSuggestion(text, cursorPosition) {
+      if (!text.trim()) {
+          this.suggestion = "";
+          this.overlay.hide();
+          return;
+      }
 
-  generateText(newContent).then((response) => {
-    document.getElementById("open-ai-text").innerText = response;
-    disabledBtn(false);
-  });
-
-
-  Widgets.showModalView({
-    title: "Open AI",
-    el,
-    chrome: true,
-    buttons: [
-      {
-        text: "Accept",
-        onClick: (e) => {
-          const text = document.getElementById("open-ai-text").innerHTML;
-          if (!["Loading...", "No suggestions"].includes(text)) {
-            // console.log({
-            //   oldhtml: composeView.getHTMLContent()
-            // });
-            composeView.setBodyHTML(text);
+      try {
+          const suggestion = await getGeminiCompletion(text);
+          this.suggestion = suggestion.trim();
+          if (this.currentElement && this.suggestion) {
+              this.overlay.show(this.currentElement, this.suggestion, cursorPosition);
           }
-          e.modalView.close();
-        },
-        type: "PRIMARY_ACTION",
-        title: "Accept the text",
-      },
-      {
-        text: "Regenerate",
-        onClick: (e) => {
-          const text = document.getElementById("open-ai-text").innerText;
+      } catch (error) {
+          console.error("Error getting suggestions:", error);
+          this.suggestion = "";
+          this.overlay.hide();
+      }
+  }
 
+  handleInput(event) {
+      const element = event.target;
+      this.currentElement = element;
+      this.cursorPosition = element.selectionStart;
+      this.debounceGetSuggestion(element.value, this.cursorPosition);
+  }
 
-          document.getElementById("open-ai-text").innerText = "Loading...";
+  handleKeyDown(event) {
+      if (event.key === "Tab" && this.suggestion) {
+          event.preventDefault();
+          const element = event.target;
+          const beforeCursor = element.value.slice(0, this.cursorPosition);
+          const afterCursor = element.value.slice(this.cursorPosition);
+          element.value = beforeCursor + this.suggestion + afterCursor;
 
+          const newCursorPosition = this.cursorPosition + this.suggestion.length;
+          element.setSelectionRange(newCursorPosition, newCursorPosition);
 
-          disabledBtn();
+          this.suggestion = "";
+          this.overlay.hide();
+      }
+  }
 
+  handleSelectionChange(event) {
+      if (this.currentElement !== event.target) {
+          this.cursorPosition = event.target.selectionStart;
+          if (this.suggestion) {
+              this.overlay.show(
+                  this.currentElement, 
+                  this.suggestion, 
+                  this.cursorPosition
+              );
+          }
+      }
+  }
 
-          generateText(text).then((response) => {
-            document.getElementById("open-ai-text").innerText = response;
-            disabledBtn(false);
-          });
-        },
-        type: "SECONDARY_ACTION",
-        title: "Regenerate the text",
-      },
-    ],
-  });
+  handleFocus(event) {
+      this.currentElement = event.target;
+      this.cursorPosition = this.currentElement.selectionStart;
+      if (event.target.value && this.suggestion) {
+          this.overlay.show(this.currentElement, this.suggestion, this.cursorPosition);
+      }
+  }
 
+  handleBlur() {
+      this.currentElement = null;
+      this.overlay.hide();
+  }
 
-  disabledBtn();
-};
+  setupEventListeners() {
+      document.addEventListener("input", this.handleInput.bind(this));
+      document.addEventListener("keydown", this.handleKeyDown.bind(this));
+      document.addEventListener("focus", this.handleFocus.bind(this), true);
+      document.addEventListener("blur", this.handleBlur.bind(this), true);
+      document.addEventListener(
+          "selectionchange", 
+          this.handleSelectionChange.bind(this),
+          true
+      );
+  }
+}
+
+new AICompletion();
