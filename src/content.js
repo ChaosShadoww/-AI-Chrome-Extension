@@ -28,7 +28,7 @@ const debounce = (func, wait) => {
         return data.response;
     }
   };
-  
+  // To displa suggestion to users
   class SuggestionOverlay {
     constructor() {
         this.overlay = document.createElement("div");
